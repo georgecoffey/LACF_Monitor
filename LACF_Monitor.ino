@@ -1,66 +1,68 @@
 /*#########################################################
  * 	Los Angeles Community Fridge - Monitoring system
  * 
- * 	Version 0.0.1
+ * 	Version 0.0.2
  * 
  * 
  * 
  * 
  * 
  * ##########################################################*/
+//--------------------------------------------------------- Setup static information
 
-// include libraries
+#define INTERVAL_TEMP_CHECK 30000	// How many milliseconds between checking the temperature
+#define INTERVAL_DATA_SEND 300000	// Interval for sending the data to the server - MUST BE LARGER THAN TEMP CHECK INTERVAL
+#define WEBPAGE_NAME "/LACF/monitor.php"
+#define WEBHOST "extra.georgecoffey.com"
+
+#define ONE_WIRE_BUS 4			// Data line for the temperature sensors is connected into pin 4 on the board
+
+//--------------------------------------------------------- include libraries
+
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecure.h> 
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPClient.h>
-
 #include <OneWire.h> 
 #include <DallasTemperature.h>
-
 #include <EEPROM.h>
 
+//--------------------------------------------------------- Define the bus connection objects
 
+OneWire oneWire(ONE_WIRE_BUS);		// Setup a oneWire instance to communicate with any OneWire devices
+DallasTemperature sensors(&oneWire);	// Pass our oneWire reference to Dallas Temperature. 
 
-
-// Data wire is plugged into pin 4 on the Arduino-ESP8266
-#define ONE_WIRE_BUS 4
-/********************************************************************/
-// Setup a oneWire instance to communicate with any OneWire devices  
-// (not just Maxim/Dallas temperature ICs) 
-OneWire oneWire(ONE_WIRE_BUS); 
-/********************************************************************/
-// Pass our oneWire reference to Dallas Temperature. 
-DallasTemperature sensors(&oneWire);
-
+//--------------------------------------------------------- Variables needed for wifi
 
 String wifiSSID = "";
 String wifiPASS = "";
 String macString = "";
-
 int wifiChanged = 1;
 byte mac[6];
 
+//--------------------------------------------------------- Array to average several temperature readings
 
+float readings1[10];
+int readings1_pointer = 0;
+String curtemp;
 
 //--------------------------------------------------------- Web Server Setup
 
-const char *host = "extra.georgecoffey.com";
+const char *host = WEBHOST;
 const int httpsPort = 443;  //HTTPS= 443 and HTTP = 80
 
-//------------------------------------- SHA1 finger print of certificate use web browser to view and copy
+//------------------------------------- SHA1 finger print of certificate use web browser to view and copy - This is not needed if using the insecure mode
 
 const char fingerprint[] PROGMEM = "F1 B1 EA AA C9 6C CC 51 6D A9 82 A6 75 B7 92 DB D1 7F 05 95";
 
 
 
-
-/*#########################################################################
+/*######################################################################################################
  * 
  * 	Run inital Setup Stuff
  * 
  * 
- * #######################################################################*/
+ * ####################################################################################################*/
 
 void setup(void) 
 {
@@ -106,36 +108,60 @@ void setup(void)
 	Serial.print("Device Mac Address: ");
 	Serial.println(macString);
 	
+//------------------- Fill the average array with the current temperature
+	
+	curtemp = sensors.getTempFByIndex(0);
+	for(int p=0; p<10; p++)
+	{
+		readings1[p] = curtemp.toFloat();
+	}
 } 
 
-/*#########################################################################
+/*######################################################################################################
+ * 
+ * 	Main Loop Stuff
  * 
  * 
- * #######################################################################*/
+ * ####################################################################################################*/
 
-String curtemp;
-int tempcorrect = 0;
+
+//--------------------------------------------------------- Timers needed
+
 unsigned long timerRead;
 unsigned long timerSend;
 unsigned long timerInput;
 unsigned long timerSendTimeout;
+unsigned long timerUptime;
 
+//--------------------------------------------------------- Counters and variables
+
+unsigned long uptime;
 int sending = 0;
-
+int tempcorrect = 0;
+float average;
 String incomingMode;
 String incomingData;
 char incoming;
 int incomingSegment = 0;
 int incomingCTR = 0;
+int incomingRead = 0;
+int sendRetry;
 
+//--------------------------------------------------------- Setup Wifi secure connection variable
 
 WiFiClientSecure httpsClient;
-int sendRetry;
-int incomingRead = 0;
+
 
 void loop(void) 
 {
+//-------------------------------------------- Count minutes of uptime
 	
+	if(abs(millis() - timerUptime) > 60000)
+	{
+		timerUptime = millis();
+		uptime++;
+		Serial.print("Uptime is ");	Serial.print(uptime);	Serial.println(" minutes.");
+	}
 	
 //-------------------------------------------- Connect or change wifi information
 
@@ -150,14 +176,16 @@ void loop(void)
 	
 //-------------------------------------------- Check the temperature every 30 seconds
 
-	if(abs(millis() - timerRead) > 10000)
+	if(abs(millis() - timerRead) > INTERVAL_TEMP_CHECK)
 	{
 		timerRead = millis();
 		
 		sensors.requestTemperatures(); // Send the command to get temperature readings
-		Serial.print("Temperature is: "); 
+		Serial.print("Current status: Temperature: "); 
 		
 		curtemp = sensors.getTempFByIndex(0);
+	
+	//------------------------------------------------- 
 		
 		if(curtemp.toInt() < -100)
 		{
@@ -166,21 +194,50 @@ void loop(void)
 		}
 		else
 		{
+		
+		//---------------------- Refill average array if the temperature was disconnected
+			
+			if(tempcorrect == 0)
+			{
+				for(int p=0; p<10; p++)
+				{
+					readings1[p] = curtemp.toFloat();
+				}
+			}
+			
+		//----------------------
+		
 			tempcorrect = 1;
+			
 			Serial.print(curtemp);
+		
+			readings1[readings1_pointer] = curtemp.toFloat();
+			readings1_pointer++;
+			if(readings1_pointer == 10)	{	readings1_pointer = 0;	}
+			
+			average = 0;
+			for(int p=0; p<10; p++)
+			{
+				average += readings1[p];
+			}
+			average = average / 10;
+			Serial.print(" average temp is: ");
+			Serial.print(average);
 		}
+		
+		
 		Serial.print(" - ");
 
 	//-------------------------------------------- Check if the Wifi is Connected and output that status
 		
 		if(WiFi.status() == WL_CONNECTED)
 		{
-			Serial.print("Wifi Connected to network \""); Serial.print(wifiSSID.c_str()); Serial.println("\"");
+			Serial.print("Wifi: Connected to network \""); Serial.print(wifiSSID.c_str()); Serial.println("\"");
 
 		}
 		else
 		{
-			Serial.print("Trying to connect to network \""); Serial.print(wifiSSID.c_str()); Serial.println("\"");
+			Serial.print("Wifi: Trying to connect to network \""); Serial.print(wifiSSID.c_str()); Serial.println("\"");
 		}
 		
 		Serial.println("");
@@ -191,14 +248,14 @@ void loop(void)
 
 	if(WiFi.status() == WL_CONNECTED)
 	{
-		if(abs(millis() - timerSend) > 60000 && sending == 0)
+		if(abs(millis() - timerSend) > INTERVAL_DATA_SEND && sending == 0)
 		{
 			timerSend = millis();
 			timerSendTimeout = millis();
 			
 		//-------------------------------------------------- Do the inital interface setup
 			
-			Serial.print("Sending data to server - 1");
+			Serial.print("Sending data to server - 1 ");
 			//httpsClient.setFingerprint(fingerprint);
 			httpsClient.setInsecure();
 			httpsClient.setTimeout(15000); // 15 Seconds
@@ -231,8 +288,15 @@ void loop(void)
 	
 		if(sending == 2)
 		{
-			String Link = "/LACF/monitor.php?temp=" + curtemp + "&network=" + wifiSSID + "&mac=" + macString;  //Specify request destination
-
+			String Link;
+			if(tempcorrect == 1)
+			{
+				Link = WEBPAGE_NAME "?avgtemp=" + String(average) + "&curtemp=" + curtemp + "&network=" + wifiSSID + "&mac=" + macString + "&uptime=" + uptime;  //Specify request destination
+			}
+			else
+			{
+				Link = WEBPAGE_NAME "?message=TemperatureUnavailable&mac=" + macString + "&uptime=" + uptime;
+			}
 			Serial.print("requesting URL: ");
 			Serial.println(host+Link);
 
